@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from enum import StrEnum
 
 
@@ -6,7 +8,10 @@ class GenomeBuild(StrEnum):
     GRCH37 = "GRCh37"
 
     @classmethod
-    def parse_from(cls, genome_build: str):
+    def parse_from(
+        cls, 
+        genome_build: str | GenomeBuild
+    ) -> GenomeBuild:
         if isinstance(genome_build, str):
             match genome_build.lower():
                 case "grch38" | "hg38" | "b38":
