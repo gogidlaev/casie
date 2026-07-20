@@ -32,7 +32,8 @@ test = "pytest"
 
 [tool.pixi.feature.dev.dependencies]
 ipykernel = "*"
+ruff = ">=0.15.22,<0.16"
 
 [tool.pixi.environments]
 test = ["test"]
-dev = ["dev"]
+dev = ["dev", "test"]
