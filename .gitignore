@@ -14,3 +14,7 @@ __pycache__/*
 
 # VS Code settings
 .vscode/*
+
+# Jupyter notebooks
+.ipynb_checkpoints/*
+notebooks/*
