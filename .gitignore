@@ -4,3 +4,10 @@
 
 # data
 data/*
+
+# Compiled Python files
+__pycache__/*
+*.py[cod]
+
+# Pytest cache
+.pytest_cache/*
