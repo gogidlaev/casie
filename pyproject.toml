@@ -34,6 +34,11 @@ test = "pytest"
 ipykernel = "*"
 ruff = ">=0.15.22,<0.16"
 
+[tool.pixi.feature.fusion.dependencies]
+pyreadr = "*"
+pandas = "*"
+pyarrow = "*"
+
 [tool.pixi.environments]
 test = ["test"]
-dev = ["dev", "test"]
+dev = ["dev", "fusion", "test"]
