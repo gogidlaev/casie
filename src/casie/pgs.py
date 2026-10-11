@@ -100,4 +100,12 @@ class PGSCollection:
             ).tocsc()
 
             return cls(weights, extra, variants, genome_build)
+
+    @property
+    def features(self):
+        return self._features.drop("_feature_idx")
+
+    @property
+    def variants(self):
+        return self._variants.drop("_variant_idx")
         
