@@ -26,7 +26,13 @@ class VariantFrame:
         if missing_cols:
             raise ValueError(f"Columns {missing_cols} not in variants")
 
-        variants = variants.with_columns(pl.col("chr_position").cast(pl.UInt32))
+        # Validate chr_names and chr_position
+        if variants.get_column("chr_name").is_null().any():
+            raise ValueError("Missing chromosome names")
+        if variants.get_column("chr_position").is_null().any():
+            raise ValueError("Missing chromosome positions")
+        if variants.get_column("chr_position").dtype != pl.UInt32:
+            raise ValueError("Chromosome positions must have pl.UInt32 dtype")
 
         expected_id = variants.select(
             pl.concat_str(
@@ -80,6 +86,13 @@ class VariantFrame:
                 
         return frame.with_columns(candidate_chr.replace_strict(chr_aliases, default=raw_chr))
 
+    @staticmethod
+    def normalize_position(
+        frame: pl.DataFrame | pl.LazyFrame,
+        chr_position: str = "chr_position"
+    ):
+        return frame.with_columns(pl.col(chr_position).cast(pl.UInt32, strict=True))
+    
     @staticmethod
     def add_variant_id(
         frame: pl.DataFrame | pl.LazyFrame,

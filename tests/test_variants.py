@@ -11,7 +11,7 @@ def frame():
     return pl.DataFrame(
         {
             "chr_name": ["2", "1"],
-            "chr_position": ["20", "2"],
+            "chr_position": pl.Series([20, 2], dtype=pl.UInt32),
             "ref": ["A", "C"],
             "alt": ["G", "T"],
             "variant_name": ["rs20", "rs2"],
@@ -31,7 +31,6 @@ def test_constructs_ids_without_reordering_or_mutating_input(frame):
     result = from_frame(frame)
 
     expected = frame.with_columns(
-        pl.Series("chr_position", [20, 2], dtype=pl.UInt32),
         pl.Series("variant_id", ["2:20:A:G", "1:2:C:T"]),
     )
     assert_frame_equal(result.frame, expected, check_column_order=False)
@@ -59,11 +58,19 @@ def test_rejects_missing_required_columns(frame, column):
         from_frame(frame.drop(column))
 
 
-@pytest.mark.parametrize("column", ["chr_name", "chr_position", "ref", "alt"])
-def test_rejects_null_variant_fields(frame, column):
-    frame = frame.with_columns(pl.lit(None).alias(column))
+@pytest.mark.parametrize(
+    ("column", "message"),
+    [
+        ("chr_name", "Missing chromosome names"),
+        ("chr_position", "Missing chromosome positions"),
+        ("ref", "Missing variant ids"),
+        ("alt", "Missing variant ids"),
+    ],
+)
+def test_rejects_null_variant_fields(frame, column, message):
+    frame = frame.with_columns(pl.lit(None, dtype=frame.schema[column]).alias(column))
 
-    with pytest.raises(ValueError, match="Missing variant ids"):
+    with pytest.raises(ValueError, match=message):
         from_frame(frame)
 
 
@@ -77,10 +84,14 @@ def test_rejects_duplicate_ids_even_with_different_metadata(frame, existing_id):
         from_frame(pl.concat([frame, duplicate]))
 
 
-@pytest.mark.parametrize("position", ["-1", "not-a-position", "4294967296"])
-def test_rejects_positions_that_cannot_be_cast_to_uint32(frame, position):
-    with pytest.raises(pl.exceptions.InvalidOperationError):
-        from_frame(frame.with_columns(chr_position=pl.lit(position)))
+@pytest.mark.parametrize("dtype", [pl.String, pl.Int64, pl.UInt64, pl.Float64])
+def test_rejects_position_dtypes_other_than_uint32(frame, dtype):
+    frame = frame.with_columns(pl.col("chr_position").cast(dtype))
+
+    with pytest.raises(
+        ValueError, match=r"Chromosome positions must have pl\.UInt32 dtype"
+    ):
+        from_frame(frame)
 
 
 @pytest.mark.parametrize("existing_id", [False, True])
@@ -119,6 +130,40 @@ def test_accepts_empty_frame_with_defined_schema(frame):
     assert result.height == 0
     assert result.schema["variant_id"] == pl.String
     assert result.schema["chr_position"] == pl.UInt32
+
+
+@pytest.mark.parametrize("lazy", [False, True], ids=["eager", "lazy"])
+@pytest.mark.parametrize("column", ["chr_position", "pos"])
+@pytest.mark.parametrize("dtype", [pl.String, pl.Int64])
+def test_normalizes_positions_without_changing_other_data(lazy, column, dtype):
+    frame = pl.DataFrame(
+        {
+            column: pl.Series([20, 2, None], dtype=pl.Int64).cast(dtype),
+            "annotation": ["first", "second", "third"],
+        }
+    )
+    original = frame.clone()
+    expected = frame.with_columns(pl.Series(column, [20, 2, None], dtype=pl.UInt32))
+    kwargs = {} if column == "chr_position" else {"chr_position": column}
+
+    result = VariantFrame.normalize_position(frame.lazy() if lazy else frame, **kwargs)
+
+    assert isinstance(result, pl.LazyFrame if lazy else pl.DataFrame)
+    if isinstance(result, pl.LazyFrame):
+        result = result.collect()
+    assert_frame_equal(result, expected)
+    assert_frame_equal(frame, original)
+
+
+@pytest.mark.parametrize("lazy", [False, True], ids=["eager", "lazy"])
+@pytest.mark.parametrize("position", ["-1", "not-a-position", "4294967296"])
+def test_normalize_position_rejects_invalid_casts(position, lazy):
+    frame = pl.DataFrame({"chr_position": [position]})
+
+    with pytest.raises(pl.exceptions.InvalidOperationError):
+        result = VariantFrame.normalize_position(frame.lazy() if lazy else frame)
+        if isinstance(result, pl.LazyFrame):
+            result.collect()
 
 
 @pytest.mark.parametrize("lazy", [False, True], ids=["eager", "lazy"])
