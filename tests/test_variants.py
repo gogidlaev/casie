@@ -63,8 +63,8 @@ def test_rejects_missing_required_columns(frame, column):
     [
         ("chr_name", "Missing chromosome names"),
         ("chr_position", "Missing chromosome positions"),
-        ("ref", "Missing variant ids"),
-        ("alt", "Missing variant ids"),
+        ("ref", "contains null values"),
+        ("alt", "contains null values"),
     ],
 )
 def test_rejects_null_variant_fields(frame, column, message):
@@ -72,6 +72,23 @@ def test_rejects_null_variant_fields(frame, column, message):
 
     with pytest.raises(ValueError, match=message):
         from_frame(frame)
+
+
+@pytest.mark.parametrize("column", ["chr_name", "ref", "alt"])
+def test_rejects_empty_variant_fields(frame, column):
+    frame = frame.with_columns(pl.lit("").alias(column))
+
+    with pytest.raises(ValueError, match="[Ee]mpty"):
+        from_frame(frame)
+
+
+@pytest.mark.parametrize(("ref", "alt"), [("C", "CA"), ("CA", "C"), ("I", "D")])
+def test_accepts_nonempty_indel_alleles(frame, ref, alt):
+    frame = frame.head(1).with_columns(ref=pl.lit(ref), alt=pl.lit(alt))
+
+    result = from_frame(frame)
+
+    assert result.frame["variant_id"].item() == f"2:20:{ref}:{alt}"
 
 
 @pytest.mark.parametrize("existing_id", [False, True])

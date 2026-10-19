@@ -27,12 +27,24 @@ class VariantFrame:
             raise ValueError(f"Columns {missing_cols} not in variants")
 
         # Validate chr_names and chr_position
-        if variants.get_column("chr_name").is_null().any():
+        chr_names = variants.get_column("chr_name")
+        if chr_names.null_count():
             raise ValueError("Missing chromosome names")
-        if variants.get_column("chr_position").is_null().any():
+        if chr_names.eq("").any():
+            raise ValueError("Empty chromosome names")
+
+        chr_positions = variants.get_column("chr_position")
+        if chr_positions.null_count():
             raise ValueError("Missing chromosome positions")
-        if variants.get_column("chr_position").dtype != pl.UInt32:
+        if chr_positions.dtype != pl.UInt32:
             raise ValueError("Chromosome positions must have pl.UInt32 dtype")
+
+        for col in (a1, a2):
+            alleles = variants.get_column(col)
+            if alleles.null_count():
+                raise ValueError(f"{col} contains null values")
+            if alleles.eq("").any():
+                raise ValueError(f"{col} contains empty values")
 
         expected_id = variants.select(
             pl.concat_str(
@@ -48,7 +60,7 @@ class VariantFrame:
             variants = variants.with_columns(expected_id)
 
         variant_ids = variants.get_column("variant_id")
-        if variant_ids.is_null().any():
+        if variant_ids.null_count():
             raise ValueError("Missing variant ids are not allowed")
         if variant_ids.is_duplicated().any():
             raise ValueError("Duplicate variant ids are not allowed")
