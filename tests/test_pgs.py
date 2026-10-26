@@ -5,7 +5,7 @@ import polars as pl
 import pytest
 from numpy.testing import assert_array_equal
 from polars.testing import assert_frame_equal
-from scipy.sparse import csc_array
+from scipy.sparse import csc_array, hstack
 
 from casie.build import GenomeBuild
 from casie.pgs import PGSCollection
@@ -220,7 +220,7 @@ def test_all_zero_weights_produce_empty_feature_axis(weights, with_metadata):
     ]
     assert result.features.is_empty()
     assert result.features["n_variants"].to_list() == []
-    assert result.collections["n_features"].item() == 0
+    assert result.collections.is_empty()
     assert result.weights.shape == (result.variants.height, 0)
     assert result.weights.nnz == 0
 
@@ -520,6 +520,84 @@ def test_feature_id_source_column_is_not_collection_metadata(weights):
     )
 
 
+@pytest.fixture
+def multiple_collections(weights):
+    first = from_weights(weights, collection_id="first", context="blood")
+    second = from_weights(weights, collection_id="second", context="brain")
+    return PGSCollection(
+        weights=hstack([first.weights, second.weights], format="csc"),
+        _features=pl.concat([first._features, second._features])
+        .drop("_pgs_idx")
+        .with_row_index("_pgs_idx"),
+        _variants=first._variants,
+        standardized=False,
+    )
+
+
+@pytest.mark.parametrize("field", ["context", "modality", "dataset", "method", "citation"])
+def test_collections_reflect_feature_metadata_updates(weights, field):
+    result = from_weights(weights)
+    original_weights = result.weights
+    result.features = result.features.with_columns(
+        pl.lit("source").alias(field), pl.Series("annotation", ["one", "two"])
+    )
+    assert result.collections.to_dicts() == [
+        {"collection_id": "models", field: "source", "n_features": 2}
+    ]
+    assert result.weights is original_weights
+
+    result.features = result.features.with_columns(pl.lit(None).alias(field))
+    assert result.collections[field].to_list() == [None]
+    result.features = result.features.drop(field)
+    assert result.collections.columns == ["collection_id", "n_features"]
+    with pytest.raises(AttributeError):
+        result.collections = result.collections
+
+
+@pytest.mark.parametrize("field", ["context", "modality", "dataset", "method", "citation"])
+@pytest.mark.parametrize("values", [["one", "two"], ["one", None]])
+def test_feature_setter_rejects_mixed_collection_metadata(multiple_collections, field, values):
+    result = multiple_collections
+    original_features = result.features.clone()
+    original_variants = result.variants.clone()
+    original_weights = result.weights
+    updated = result.features.filter(pl.col("collection_id") == "first").with_columns(
+        pl.Series(field, values)
+    )
+
+    with pytest.raises(ValueError, match="single value per collection_id"):
+        result.features = updated
+
+    assert_frame_equal(result.features, original_features)
+    assert_frame_equal(result.variants, original_variants)
+    assert result.weights is original_weights
+
+
+def test_collections_follow_feature_and_variant_filtering(multiple_collections):
+    result = multiple_collections
+    assert result.collections.to_dicts() == [
+        {"collection_id": "first", "context": "blood", "n_features": 2},
+        {"collection_id": "second", "context": "brain", "n_features": 2},
+    ]
+    result.features = result.features.filter(pl.col("collection_id") == "second")
+    assert result.collections.to_dicts() == [
+        {"collection_id": "second", "context": "brain", "n_features": 2}
+    ]
+    result.variants = result.variants.filter(pl.col("chr_position") == 2)
+    assert result.collections.to_dicts() == [
+        {"collection_id": "second", "context": "brain", "n_features": 1}
+    ]
+    assert_array_equal(result.weights.toarray(), [[1.25]])
+
+
+def test_constructor_rejects_mixed_citations(weights):
+    features = pl.DataFrame(
+        {"feature_id": ["gene1", "gene2"], "citation": ["first", "second"]}
+    )
+    with pytest.raises(ValueError, match="single value per collection_id"):
+        from_weights(weights, features=features)
+
+
 def test_variant_names_are_optional(weights):
     result = from_weights(weights.drop("rsid"))
 
@@ -544,7 +622,7 @@ def test_empty_weights_drop_unweighted_features(weights, with_metadata):
     assert result.weights.nnz == 0
     assert result.features.is_empty()
     assert result.variants.schema["chr_position"] == pl.UInt32
-    assert result.collections["n_features"].item() == 0
+    assert result.collections.is_empty()
 
 
 @pytest.mark.parametrize(
@@ -738,3 +816,105 @@ def test_predictdb_rejects_missing_database_without_creating_it(tmp_path):
     with pytest.raises(FileNotFoundError, match="PredictDB database not found"):
         PGSCollection.from_predictdb(path)
     assert not path.exists()
+
+
+@pytest.mark.parametrize("key", ["collection_id", "feature_id"])
+def test_feature_setter_rejects_unknown_keys_without_changing_collection(weights, key):
+    result = from_weights(weights)
+    original_features = result.features.clone()
+    original_variants = result.variants.clone()
+    original_collections = result.collections.clone()
+    original_weights = result.weights.copy()
+    updated = result.features.head(1).with_columns(pl.lit("unknown").alias(key))
+
+    with pytest.raises(ValueError, match="must be a subset of the existing set"):
+        result.features = updated
+
+    assert_frame_equal(result.features, original_features)
+    assert_frame_equal(result.variants, original_variants)
+    assert_frame_equal(result.collections, original_collections)
+    assert_array_equal(result.weights.toarray(), original_weights.toarray())
+
+
+@pytest.mark.parametrize(
+    ("position", "feature_id", "effect_weight"),
+    [(2, "gene2", 1.25), (10, "gene1", -0.5)],
+)
+def test_variant_setter_removes_unweighted_feature_columns(
+    weights, position, feature_id, effect_weight
+):
+    result = from_weights(weights)
+    retained = result.variants.filter(pl.col("chr_position") == position)
+
+    result.variants = retained
+
+    assert_frame_equal(result.variants, retained)
+    assert result.features["feature_id"].to_list() == [feature_id]
+    assert result.features["n_variants"].to_list() == [1]
+    assert result.collections["n_features"].to_list() == [1]
+    assert result._features["_pgs_idx"].to_list() == [0]
+    assert result._variants.frame["_variant_idx"].to_list() == [0]
+    assert isinstance(result.weights, csc_array)
+    assert_array_equal(result.weights.toarray(), [[effect_weight]])
+
+
+def test_variant_setter_preserves_shuffled_metadata_and_repeated_filtering(weights):
+    result = from_weights(weights)
+    # Metadata order may differ from the matrix order; preserve hidden indices.
+    result._features = result._features.reverse()
+    result.variants = result.variants.reverse()
+
+    result.variants = result.variants.filter(pl.col("chr_name") == "1")
+
+    assert result.features["feature_id"].to_list() == ["gene1", "gene2"]
+    assert result.variants["chr_position"].to_list() == [10, 2]
+    assert result.features["n_variants"].to_list() == [1, 1]
+    assert result.collections["n_features"].to_list() == [2]
+    assert result._features["_pgs_idx"].to_list() == [0, 1]
+    assert result._variants.frame["_variant_idx"].to_list() == [0, 1]
+    assert_array_equal(result.weights.toarray(), [[-0.5, 0.0], [0.0, 1.25]])
+
+    # The next selection must use the compacted row and column indices.
+    result.variants = result.variants.filter(pl.col("chr_position") == 2)
+
+    assert result.features["feature_id"].to_list() == ["gene2"]
+    assert result.features["n_variants"].to_list() == [1]
+    assert result.collections["n_features"].to_list() == [1]
+    assert result._features["_pgs_idx"].to_list() == [0]
+    assert result._variants.frame["_variant_idx"].to_list() == [0]
+    assert_array_equal(result.weights.toarray(), [[1.25]])
+
+
+def test_variant_setter_ignores_explicit_zero_weights(weights):
+    result = from_weights(weights)
+    stored = result.weights.tocoo()
+    # Add an explicitly stored zero for gene2 at the variant used by gene1.
+    result.weights = csc_array(
+        (
+            np.append(stored.data, 0.0),
+            (np.append(stored.row, 1), np.append(stored.col, 0)),
+        ),
+        shape=result.weights.shape,
+    )
+
+    result.variants = result.variants.filter(pl.col("chr_position") == 10)
+
+    assert result.features["feature_id"].to_list() == ["gene1"]
+    assert result.weights.nnz == 1
+    assert_array_equal(result.weights.toarray(), [[-0.5]])
+
+
+def test_variant_setter_validates_before_changing_collection(weights):
+    result = from_weights(weights)
+    original_features = result.features.clone()
+    original_variants = result.variants.clone()
+    original_collections = result.collections.clone()
+    original_weights = result.weights.copy()
+
+    with pytest.raises(ValueError, match="chr_name.*not in variants"):
+        result.variants = result.variants.head(1).drop("chr_name")
+
+    assert_frame_equal(result.features, original_features)
+    assert_frame_equal(result.variants, original_variants)
+    assert_frame_equal(result.collections, original_collections)
+    assert_array_equal(result.weights.toarray(), original_weights.toarray())

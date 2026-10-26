@@ -4,14 +4,16 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 from scipy.sparse import coo_array, csc_array
 
 from .build import GenomeBuild
 from .variants import VariantFrame
+from .utils import update_indexed_frame
 
 
-@dataclass(frozen=True, slots=True, repr=False)
+@dataclass(slots=True, repr=False)
 class PGSCollection:
     """A class for representing a collection of sparse polygenic scores.
     
@@ -26,7 +28,7 @@ class PGSCollection:
     variants : polars.DataFrame
         Variant metadata, with rows corresponding to weight matrix rows.
     collections : polars.DataFrame
-        Collection metadata
+        Read-only collection metadata and feature counts, derived from features.
     standardized : bool
         Whether wights apply to standardized genotypes (True) or raw dosages (False). 
         This does not modify the weights but determines their use for downstream methods
@@ -37,8 +39,10 @@ class PGSCollection:
     weights: csc_array
     _features: pl.DataFrame
     _variants: VariantFrame
-    _collections: pl.DataFrame
     standardized: bool
+
+    def __post_init__(self):
+        self._summarize_collections(self._features)
 
     @classmethod
     def from_long_weights(
@@ -299,12 +303,11 @@ class PGSCollection:
         if "n_variants_reported" in features_frame.columns:
             n_variant_cols = ["n_variants_reported"] + n_variant_cols
         first_cols = [
-            "_collection_idx", "_pgs_idx", "collection_id", "feature_id",
+            "_pgs_idx", "collection_id", "feature_id",
             *collection_keys, *n_variant_cols
         ]
 
         features_frame = features_frame.with_columns(
-            pl.lit(0, dtype=pl.UInt32).alias("_collection_idx"),
             pl.lit(collection_id).alias("collection_id"),
             *[pl.lit(collection[key]).alias(key) for key in collection_keys],
         ).select(*first_cols, pl.exclude(first_cols))
@@ -327,16 +330,10 @@ class PGSCollection:
             shape=(variants.frame.height, features_frame.height),
         ).tocsc()
 
-        collections_frame = pl.DataFrame({
-            **collection,
-            "n_features": features_frame.height,
-        }).with_row_index("_collection_idx")
-        
         return cls(
             weights=weights_csc, 
             _features=features_frame, 
             _variants=variants, 
-            _collections=collections_frame, 
             standardized=standardized
         )
 
@@ -443,7 +440,54 @@ class PGSCollection:
 
     @property
     def features(self):
-        return self._features.drop(["_collection_idx", "_pgs_idx"])
+        return self._features.drop("_pgs_idx")
+
+    @features.setter
+    def features(self, new_features: pl.DataFrame):
+        if not isinstance(new_features, pl.DataFrame):
+            raise TypeError("Updated features must be a polars DataFrame")
+
+        new_features = update_indexed_frame(
+            self._features,
+            new_features,
+            indices=["_pgs_idx"],
+            keys=["collection_id", "feature_id"]
+        )
+        self._summarize_collections(new_features)
+
+        if new_features.height != self._features.height:
+            new_weights = self.weights[:, new_features["_pgs_idx"].to_numpy()].tocsr()
+            new_features = new_features.drop("_pgs_idx").with_row_index("_pgs_idx")
+
+            # Weight indices and variant indices are sorted
+            # Avoid rebuilding the VariantFrame because we're subsetting rows
+            active_rows = np.flatnonzero(np.diff(new_weights.indptr))
+            active_ids = pl.Series(
+                active_rows,
+                dtype=self._variants.frame.schema["_variant_idx"],
+            )
+
+            new_variants_frame = self._variants.frame.filter(
+                pl.col("_variant_idx").is_in(active_ids.implode())
+            )
+
+            new_weights = new_weights[
+                new_variants_frame["_variant_idx"].to_numpy(), :
+            ].tocsc()
+
+            # These indices now refer to the compacted matrix
+            new_variants_frame = (
+                new_variants_frame
+                .drop("_variant_idx")
+                .with_row_index("_variant_idx")
+            )
+
+            self.weights = new_weights.tocsc()
+            self._features = new_features
+            self._variants.frame = new_variants_frame
+
+        self._features = new_features
+        self._calculate_n_variants()
 
     @property
     def variants(self):
@@ -452,10 +496,81 @@ class PGSCollection:
         else:
             return self._variants.frame
 
+    @variants.setter
+    def variants(self, new_variants: pl.DataFrame):
+        if not isinstance(new_variants, pl.DataFrame):
+            raise TypeError("Updated variants must be a polars DataFrame")
+
+        if self._variants.hide_cols is None:
+            raise IndexError("Variant metadata contains no identity columns")
+
+        new_variants = update_indexed_frame(
+            self._variants.frame,
+            new_variants,
+            indices=self._variants.hide_cols,
+            keys=["variant_id"]
+        )
+
+        filtered = new_variants.height != self._variants.frame.height
+        if filtered:
+            new_weights = self.weights.tocsr()[new_variants["_variant_idx"].to_numpy(), :]
+            new_weights.eliminate_zeros()
+
+            # CSR indices identify the feature columns that still have weights.
+            active_ids = pl.Series(
+                np.unique(new_weights.indices),
+                dtype=self._features.schema["_pgs_idx"],
+            )
+            new_features = self._features.filter(
+                pl.col("_pgs_idx").is_in(active_ids.implode())
+            )
+            # Slice in metadata order before assigning new column indices.
+            new_weights = new_weights.tocsc()[:, new_features["_pgs_idx"].to_numpy()]
+            new_features = (
+                new_features
+                .drop("_pgs_idx")
+                .with_row_index("_pgs_idx")
+            )
+            new_variants = new_variants.drop("_variant_idx").with_row_index("_variant_idx")
+        else:
+            new_weights = self.weights
+            new_features = self._features
+        # Even if we don't filter variants, we still need to validate
+        # the variant metadata by constructing a new VariantFrame, and
+        # we need to do it before assigning the other metadata
+        self._variants = VariantFrame(
+            new_variants,
+            a1=self._variants.a1,
+            a2=self._variants.a2,
+            genome_build=self._variants.genome_build,
+            hide_cols=self._variants.hide_cols
+        )
+        self.weights = new_weights.tocsc()
+        self._features = new_features
+        if filtered:
+            self._calculate_n_variants()
+
+    @property
+    def collections(self):
+        return self._summarize_collections(self._features)
+
+    @staticmethod
+    def _summarize_collections(features: pl.DataFrame) -> pl.DataFrame:
+        fields = ["context", "modality", "dataset", "method", "citation"]
+        keys = ["collection_id", *(field for field in fields if field in features.columns)]
+        collections = features.group_by(keys, maintain_order=True).len("n_features")
+        if collections.height != features["collection_id"].n_unique():
+            raise ValueError(
+                "Collection-level metadata must have a single value per collection_id"
+            )
+        return collections
+
     @property
     def genome_build(self):
         return self._variants.genome_build
     
-    @property
-    def collections(self):
-        return self._collections.drop(["_collection_idx"])
+    def _calculate_n_variants(self):
+        counts = np.diff(self.weights.indptr).astype(np.uint32)
+        self._features = self._features.with_columns(
+            n_variants=counts[self._features["_pgs_idx"].to_numpy()]
+        )
