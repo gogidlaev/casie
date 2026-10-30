@@ -36,7 +36,7 @@ def update_indexed_frame(
     """
     if new.is_empty():
         raise ValueError("New metadata is empty")
-    
+
     for col in indices:
         if col in new.columns:
             raise ValueError(f"Column {col} is protected from modification")

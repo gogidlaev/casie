@@ -525,7 +525,7 @@ def multiple_collections(weights):
     first = from_weights(weights, collection_id="first", context="blood")
     second = from_weights(weights, collection_id="second", context="brain")
     return PGSCollection(
-        weights=hstack([first.weights, second.weights], format="csc"),
+        weights=csc_array(hstack([first.weights, second.weights], format="csc")),
         _features=pl.concat([first._features, second._features])
         .drop("_pgs_idx")
         .with_row_index("_pgs_idx"),
@@ -551,7 +551,7 @@ def test_collections_reflect_feature_metadata_updates(weights, field):
     result.features = result.features.drop(field)
     assert result.collections.columns == ["collection_id", "n_features"]
     with pytest.raises(AttributeError):
-        result.collections = result.collections
+        setattr(result, "collections", result.collections)
 
 
 @pytest.mark.parametrize("field", ["context", "modality", "dataset", "method", "citation"])

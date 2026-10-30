@@ -16,7 +16,7 @@ from .utils import update_indexed_frame
 @dataclass(slots=True, repr=False)
 class PGSCollection:
     """A class for representing a collection of sparse polygenic scores.
-    
+
     Use `from_predictdb` to load a PredictDB database. To construct a collection from custom weights, use `from_long_weights`.
     Attributes
     ----------
@@ -30,12 +30,13 @@ class PGSCollection:
     collections : polars.DataFrame
         Read-only collection metadata and feature counts, derived from features.
     standardized : bool
-        Whether wights apply to standardized genotypes (True) or raw dosages (False). 
+        Whether wights apply to standardized genotypes (True) or raw dosages (False).
         This does not modify the weights but determines their use for downstream methods
         such as summary-level TWAS.
     genome_build : casie.GenomeBuild
         Reference genome assembly for the variant coordinates.
     """
+
     weights: csc_array
     _features: pl.DataFrame
     _variants: VariantFrame
@@ -63,7 +64,7 @@ class PGSCollection:
         dataset: str | None = None,
         context: str | None = None,
         modality: str | None = None,
-        method: str | None = None
+        method: str | None = None,
     ) -> PGSCollection:
         """Construct PGSCollection from a long-form dataframe of weights.
 
@@ -75,7 +76,7 @@ class PGSCollection:
             Whether the weights in the collection are with respect to raw (False)
             or standardized (True) genotypes
         genome_build : str | casie.GenomeBuild
-            Reference genome assembly for the variant coordinates. If a string, must be 
+            Reference genome assembly for the variant coordinates. If a string, must be
             parseable by `GenomeBuild.parse_from` method.
         collection_id : str
             Identifier of the collection. Together with feature_id, identifies
@@ -83,7 +84,7 @@ class PGSCollection:
         feature_id : str
             Name of the column that contains feature IDs. If 'features' are provided, both
             dataframes must use the same column name to identify features. If it's not "feature_id", the
-            specified column will only be copied to "feature_id" column 
+            specified column will only be copied to "feature_id" column
         effect_weight : str
             Name of the column that contains the weight of the effect allele
         chr_name : str, default "chr_name"
@@ -116,7 +117,7 @@ class PGSCollection:
         one distinct value and no nulls, unless selected as the feature ID column.
         Omitted arguments are inferred from those columns; supplied arguments must
         agree with them. Resolved values populate collection and feature metadata.
-        Score identity is determined by (collection_id, feature_id). The weights are 
+        Score identity is determined by (collection_id, feature_id). The weights are
         filtered for non-zero effect weights and zero-predictor features with a warning; thus,
         assembled metadata might have slightly fewer features than the original source.
         """
@@ -159,7 +160,14 @@ class PGSCollection:
 
         collection_keys = [key for key in collection_fields if key in collection]
 
-        required_cols = [feature_id, chr_name, chr_position, other_allele, effect_allele, effect_weight]
+        required_cols = [
+            feature_id,
+            chr_name,
+            chr_position,
+            other_allele,
+            effect_allele,
+            effect_weight,
+        ]
         if variant_name is not None:
             required_cols.append(variant_name)
 
@@ -169,7 +177,7 @@ class PGSCollection:
             else weights.columns
         )
         missing_cols = set(required_cols).difference(weight_columns)
-        
+
         if missing_cols:
             raise ValueError(f"Columns {missing_cols} not in weights")
 
@@ -195,14 +203,21 @@ class PGSCollection:
             weights = weights.collect()
 
         variant_cols = [
-            "chr_name", "chr_position", "other_allele", "effect_allele",
+            "chr_name",
+            "chr_position",
+            "other_allele",
+            "effect_allele",
             "variant_id",
         ]
         if variant_name is not None:
             variant_cols.append("variant_name")
 
         variants = weights.select(variant_cols).unique("variant_id")
-        variants = VariantFrame.sort_variants(variants).with_row_index("_variant_idx")
+        variants = (
+            VariantFrame
+            .sort_variants(variants)
+            .with_row_index("_variant_idx")
+        )
         variants = VariantFrame(
             variants.collect() if isinstance(variants, pl.LazyFrame) else variants,
             a1="other_allele",
@@ -212,14 +227,18 @@ class PGSCollection:
         )
 
         if weights.select(["feature_id", "variant_id"]).is_duplicated().any():
-            raise ValueError("Duplicate feature x variant combinations in weights")
+            raise ValueError(
+                "Duplicate feature x variant combinations in weights"
+            )
 
         effect_weights = weights.get_column("effect_weight")
 
         if effect_weights.null_count():
             raise ValueError(f"{effect_weight} column contains null weights")
         if not effect_weights.is_finite().all():
-            raise ValueError(f"{effect_weight} column contains NaN or infinite weights")
+            raise ValueError(
+                f"{effect_weight} column contains NaN or infinite weights"
+            )
 
         # Supplied feature metadata still uses the caller's source column name.
         weight_feature_ids = weights.select(
@@ -233,14 +252,20 @@ class PGSCollection:
             features_frame = weight_feature_ids
         else:
             if feature_id not in features.columns:
-                raise ValueError(f"Column {feature_id} must be present in features")
+                raise ValueError(
+                    f"Column {feature_id} must be present in features"
+                )
             features = features.with_columns(pl.col(feature_id).cast(pl.String))
             metadata_ids = features.get_column(feature_id)
-            
+
             if metadata_ids.null_count():
-                raise ValueError("Missing feature ids in features are not allowed")
+                raise ValueError(
+                    "Missing feature ids in features are not allowed"
+                )
             if metadata_ids.is_duplicated().any():
-                raise ValueError("Duplicate feature ids in features are not allowed")
+                raise ValueError(
+                    "Duplicate feature ids in features are not allowed"
+                )
 
             missing_features = weight_feature_ids.join(
                 features.select(feature_id),
@@ -248,14 +273,17 @@ class PGSCollection:
                 how="anti",
             )
             if not missing_features.is_empty():
-                raise ValueError(f"{missing_features.height} features in weights are missing from features metadata")
+                raise ValueError(
+                    f"{missing_features.height} features in weights "
+                    "are missing from features metadata"
+                )
 
             features_frame = features
 
         n_weights_before = weights.height
         weights = weights.filter(pl.col("effect_weight") != 0)
         n_zero_weights = n_weights_before - weights.height
-        
+
         if n_zero_weights:
             warnings.warn(
                 f"Collection {collection_id!r}: removed "
@@ -293,8 +321,7 @@ class PGSCollection:
         )
 
         features_frame = (
-            features_frame
-            .with_columns(pl.col(feature_id).alias("feature_id"))
+            features_frame.with_columns(pl.col(feature_id).alias("feature_id"))
             .drop("n_variants", strict=False)
             .join(n_variants, on="feature_id", how="inner", maintain_order="left")
         )
@@ -303,19 +330,24 @@ class PGSCollection:
         if "n_variants_reported" in features_frame.columns:
             n_variant_cols = ["n_variants_reported"] + n_variant_cols
         first_cols = [
-            "_pgs_idx", "collection_id", "feature_id",
-            *collection_keys, *n_variant_cols
+            "_pgs_idx",
+            "collection_id",
+            "feature_id",
+            *collection_keys,
+            *n_variant_cols,
         ]
 
         features_frame = features_frame.with_columns(
             pl.lit(collection_id).alias("collection_id"),
-            *[pl.lit(collection[key]).alias(key) for key in collection_keys],
+            *[pl.lit(collection[key]).alias(key) for key in collection_keys]
         ).select(*first_cols, pl.exclude(first_cols))
 
         weights = (
-            weights
-            .select(["variant_id", "feature_id", "effect_weight"])
-            .join(variants.frame.select(["_variant_idx", "variant_id"]), on="variant_id")
+            weights.select(["variant_id", "feature_id", "effect_weight"])
+            .join(
+                variants.frame.select(["_variant_idx", "variant_id"]), 
+                on="variant_id"
+            )
             .join(feature_index, on="feature_id", validate="m:1")
             .select(["_variant_idx", "_pgs_idx", "effect_weight"])
         )
@@ -331,10 +363,10 @@ class PGSCollection:
         ).tocsc()
 
         return cls(
-            weights=weights_csc, 
-            _features=features_frame, 
-            _variants=variants, 
-            standardized=standardized
+            weights=weights_csc,
+            _features=features_frame,
+            _variants=variants,
+            standardized=standardized,
         )
 
     @classmethod
@@ -346,7 +378,7 @@ class PGSCollection:
         dataset: str | None = None,
         context: str | None = None,
         modality: str | None = None,
-        method: str | None = None
+        method: str | None = None,
     ) -> PGSCollection:
         """
         Load a PredictDB database as a PGSCollection
@@ -356,7 +388,7 @@ class PGSCollection:
         db : str | Path
             Path to the PredictDB database
         genome_build : str | casie.GenomeBuild
-            Reference genome assembly for the variant coordinates. If a string, must be 
+            Reference genome assembly for the variant coordinates. If a string, must be
             parseable by `GenomeBuild.parse_from` method.
         collection_id : str, optional
             Identifier of the collection. Together with feature_id, identifies
@@ -385,34 +417,53 @@ class PGSCollection:
         with closing(sqlite3.connect(db_path)) as conn:
             extra = pl.read_database("SELECT * FROM extra", conn)
             weights = pl.read_database("SELECT * FROM weights", conn)
-        
-        extra = extra.rename({
-            "gene": "gene_id",
-            "genename": "gene_name",
-            "pred.perf.R2": "pred_r2",
-            "pred.perf.pval": "pred_pval",
-            "n.snps.in.model": "n_variants_reported"
-        })
-        required_cols = ["gene_id", "gene_name", "pred_r2", "pred_pval", "n_variants_reported"]
+
+        extra = extra.rename(
+            {
+                "gene": "gene_id",
+                "genename": "gene_name",
+                "pred.perf.R2": "pred_r2",
+                "pred.perf.pval": "pred_pval",
+                "n.snps.in.model": "n_variants_reported",
+            }
+        )
+        required_cols = [
+            "gene_id",
+            "gene_name",
+            "pred_r2",
+            "pred_pval",
+            "n_variants_reported",
+        ]
         extra = extra.select(pl.col(required_cols), pl.exclude(required_cols))
 
-        weights = (
-            weights
-            .with_columns(
-                pl.col("gene").alias("gene_id"),
-                pl.col("varID").str.split("_").list.to_struct(
-                    fields=["chr_name", "chr_position", "varid_other_allele", "varid_effect_allele", "genome_build"]
-                ).struct.unnest(),
-                pl.col("ref_allele").alias("other_allele"),
-                pl.col("eff_allele").alias("effect_allele")
+        weights = weights.with_columns(
+            pl.col("gene").alias("gene_id"),
+            pl.col("varID")
+            .str.split("_")
+            .list.to_struct(
+                fields=[
+                    "chr_name",
+                    "chr_position",
+                    "varid_other_allele",
+                    "varid_effect_allele",
+                    "genome_build",
+                ]
             )
+            .struct.unnest(),
+            pl.col("ref_allele").alias("other_allele"),
+            pl.col("eff_allele").alias("effect_allele"),
         )
 
         genome_build_inferred = weights["genome_build"].unique()
         if len(genome_build_inferred) > 1:
-            raise ValueError(f"Found multiple genome builds in the weights table: {genome_build_inferred}")
-        genome_build_inferred = GenomeBuild.parse_from(genome_build_inferred.cast(pl.String)[0])
-        
+            raise ValueError(
+                "Found multiple genome builds in the weights table: "
+                f"{genome_build_inferred}"
+            )
+        genome_build_inferred = GenomeBuild.parse_from(
+            genome_build_inferred.cast(pl.String)[0]
+        )
+
         if genome_build is None:
             genome_build = genome_build_inferred
         else:
@@ -420,7 +471,8 @@ class PGSCollection:
             if genome_build != genome_build_inferred:
                 raise ValueError(
                     f"Genome build mismatch: provided {genome_build.value}, "
-                    f"but found {genome_build_inferred.value} in the weights table"
+                    f"but found {genome_build_inferred.value} in the "
+                    "weights table"
                 )
 
         return cls.from_long_weights(
@@ -435,7 +487,7 @@ class PGSCollection:
             dataset=dataset,
             context=context,
             modality=modality,
-            method=method
+            method=method,
         )
 
     @property
@@ -451,14 +503,19 @@ class PGSCollection:
             self._features,
             new_features,
             indices=["_pgs_idx"],
-            keys=["collection_id", "feature_id"]
+            keys=["collection_id", "feature_id"],
         )
         self._summarize_collections(new_features)
 
         if new_features.height != self._features.height:
-            new_weights = self.weights[:, new_features["_pgs_idx"].to_numpy()].tocsr()
-            new_features = new_features.drop("_pgs_idx").with_row_index("_pgs_idx")
-
+            new_weights = self.weights[
+                :, new_features["_pgs_idx"].to_numpy()
+            ].tocsr()
+            new_features = (
+                new_features
+                .drop("_pgs_idx")
+                .with_row_index("_pgs_idx")
+            )
             # Weight indices and variant indices are sorted
             # Avoid rebuilding the VariantFrame because we're subsetting rows
             active_rows = np.flatnonzero(np.diff(new_weights.indptr))
@@ -508,12 +565,14 @@ class PGSCollection:
             self._variants.frame,
             new_variants,
             indices=self._variants.hide_cols,
-            keys=["variant_id"]
+            keys=["variant_id"],
         )
 
         filtered = new_variants.height != self._variants.frame.height
         if filtered:
-            new_weights = self.weights.tocsr()[new_variants["_variant_idx"].to_numpy(), :]
+            new_weights = self.weights.tocsr()[
+                new_variants["_variant_idx"].to_numpy(), :
+            ]
             new_weights.eliminate_zeros()
 
             # CSR indices identify the feature columns that still have weights.
@@ -525,13 +584,19 @@ class PGSCollection:
                 pl.col("_pgs_idx").is_in(active_ids.implode())
             )
             # Slice in metadata order before assigning new column indices.
-            new_weights = new_weights.tocsc()[:, new_features["_pgs_idx"].to_numpy()]
+            new_weights = new_weights.tocsc()[
+                :, new_features["_pgs_idx"].to_numpy()
+            ]
             new_features = (
                 new_features
                 .drop("_pgs_idx")
                 .with_row_index("_pgs_idx")
             )
-            new_variants = new_variants.drop("_variant_idx").with_row_index("_variant_idx")
+            new_variants = (
+                new_variants
+                .drop("_variant_idx")
+                .with_row_index("_variant_idx")
+            )
         else:
             new_weights = self.weights
             new_features = self._features
@@ -543,7 +608,7 @@ class PGSCollection:
             a1=self._variants.a1,
             a2=self._variants.a2,
             genome_build=self._variants.genome_build,
-            hide_cols=self._variants.hide_cols
+            hide_cols=self._variants.hide_cols,
         )
         self.weights = new_weights.tocsc()
         self._features = new_features
@@ -557,7 +622,10 @@ class PGSCollection:
     @staticmethod
     def _summarize_collections(features: pl.DataFrame) -> pl.DataFrame:
         fields = ["context", "modality", "dataset", "method", "citation"]
-        keys = ["collection_id", *(field for field in fields if field in features.columns)]
+        keys = [
+            "collection_id",
+            *(field for field in fields if field in features.columns),
+        ]
         collections = features.group_by(keys, maintain_order=True).len("n_features")
         if collections.height != features["collection_id"].n_unique():
             raise ValueError(
@@ -568,7 +636,7 @@ class PGSCollection:
     @property
     def genome_build(self):
         return self._variants.genome_build
-    
+
     def _calculate_n_variants(self):
         counts = np.diff(self.weights.indptr).astype(np.uint32)
         self._features = self._features.with_columns(
