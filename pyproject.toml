@@ -16,6 +16,8 @@ platforms = ["linux-64"]
 casie = { path = ".", editable = true }
 
 [tool.pixi.tasks]
+test = { cmd = "pytest", default-environment = "test" }
+format = { cmd = "ruff format src/casie", default-environment="dev" }
 
 [tool.pixi.dependencies]
 pgenlib = ">=0.94.1,<0.95"

@@ -137,7 +137,7 @@ def test_preserves_hidden_indices_and_records_hidden_columns(frame):
 
 @pytest.mark.parametrize("column", ["ref", "variant_id", "variant_name"])
 def test_rejects_hiding_variant_metadata(frame, column):
-    with pytest.raises(ValueError, match="Hidden columns cannot"):
+    with pytest.raises(ValueError, match="New columns cannot"):
         from_frame(frame, hide_cols=[column])
 
 
